@@ -1,0 +1,128 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- 
+    Launch file for Dijkstra-Enhanced UR10e RG2 MoveIt Server (Part 3)
+    This launch file starts the enhanced path planning system with 2D Dijkstra preprocessing
+    
+    Usage:
+        roslaunch ur10e_rg2_moveit dijkstra_part3.launch
+        roslaunch ur10e_rg2_moveit dijkstra_part3.launch use_rviz:=true
+        roslaunch ur10e_rg2_moveit dijkstra_part3.launch dijkstra_height:=0.15
+    -->
+
+    <!-- Arguments for TCP Endpoint -->
+    <arg name="tcp_ip" default="0.0.0.0" doc="IP address for Unity-ROS TCP communication"/>
+    <arg name="tcp_port" default="10000" doc="Port for Unity-ROS TCP communication"/>
+
+    <!-- Arguments for Dijkstra Path Planning -->
+    <arg name="dijkstra_height" default="0.1" doc="Height above table surface for 2D path planning (meters)"/>
+    <arg name="height_tolerance" default="0.05" doc="Tolerance for considering poses at same height (meters)"/>
+    <arg name="use_dijkstra_preprocessing" default="true" doc="Enable Dijkstra 2D preprocessing"/>
+
+    <!-- Arguments for MoveIt Configuration -->
+    <arg name="pipeline" default="ompl" doc="Motion planning pipeline to use"/>
+    <arg name="planner_id" default="RRT" doc="Motion planner algorithm"/>
+    <arg name="planning_time" default="15.0" doc="Maximum planning time in seconds"/>
+
+    <!-- Arguments for Visualization and Debugging -->
+    <arg name="use_rviz" default="false" doc="Start RViz for visualization"/>
+    <arg name="use_gui" default="false" doc="Show joint state publisher GUI"/>
+    <arg name="debug" default="false" doc="Enable debug mode"/>
+
+    <!-- Arguments for Database -->
+    <arg name="db" default="false" doc="Start database for trajectory storage"/>
+    <arg name="db_path" default="$(find ur10e_rg2_moveit)/default_warehouse_mongo_db" doc="Database path"/>
+
+    <!-- Arguments for Controller Management -->
+    <arg name="moveit_controller_manager" default="fake" doc="Controller manager type: fake, simple, or ros_control"/>
+    <arg name="fake_execution_type" default="interpolate" doc="Execution mode for fake controllers"/>
+    <arg name="load_robot_description" default="true" doc="Load robot description"/>
+
+    <!-- Display configuration info -->
+    <group if="$(arg debug)">
+        <node name="dijkstra_config_info" pkg="rospy_tutorials" type="talker" output="screen">
+            <param name="message" value="Dijkstra MoveIt Server Configuration: height=$(arg dijkstra_height)m, tolerance=$(arg height_tolerance)m, preprocessing=$(arg use_dijkstra_preprocessing)"/>
+        </node>
+    </group>
+
+    <!-- TCP Endpoint Node for Unity Communication -->
+    <node name="server_endpoint" pkg="ros_tcp_endpoint" type="default_server_endpoint.py" args="--wait" output="screen" respawn="true">
+        <param name="tcp_ip" type="string" value="$(arg tcp_ip)"/>
+        <param name="tcp_port" type="int" value="$(arg tcp_port)"/>
+    </node>
+
+    <!-- Enhanced Dijkstra MoveIt Server Node -->
+    <node name="dijkstra_mover" pkg="ur10e_rg2_moveit" type="dijkstra_mover.py" args="--wait" output="screen" respawn="false">
+        <!-- Dijkstra Planning Parameters -->
+        <param name="dijkstra_height" type="double" value="$(arg dijkstra_height)"/>
+        <param name="height_tolerance" type="double" value="$(arg height_tolerance)"/>
+        <param name="use_dijkstra_preprocessing" type="bool" value="$(arg use_dijkstra_preprocessing)"/>
+        
+        <!-- Motion Planning Parameters -->
+        <param name="planner_id" type="string" value="$(arg planner_id)"/>
+        <param name="planning_time" type="double" value="$(arg planning_time)"/>
+        
+        <!-- Workspace Boundaries (UR10e robot working area) -->
+        <param name="workspace_x_min" type="double" value="-1.5"/>
+        <param name="workspace_x_max" type="double" value="1.5"/>
+        <param name="workspace_y_min" type="double" value="-1.5"/>
+        <param name="workspace_y_max" type="double" value="1.5"/>
+        <param name="workspace_z_min" type="double" value="0.0"/>
+        <param name="workspace_z_max" type="double" value="2.0"/>
+        
+        <!-- Grid Configuration (60x60 cells, 0.05m resolution) -->
+        <param name="grid_width" type="int" value="60"/>
+        <param name="grid_height" type="int" value="60"/>
+        <param name="grid_resolution" type="double" value="0.05"/>
+        
+        <!-- Safety and Performance Parameters -->
+        <param name="safety_margin" type="double" value="0.05"/>
+        <param name="max_planning_attempts" type="int" value="100"/>
+        <param name="waypoint_sampling_step" type="int" value="5"/>
+    </node>
+
+    <!-- If needed, broadcast static tf for robot root -->
+    <node pkg="tf2_ros" type="static_transform_publisher" name="virtual_joint_broadcaster_0" args="0 0 0 0 0 0 world base_link"/>
+
+    <!-- Fake Controller Setup (for testing without real robot) -->
+    <group if="$(eval arg('moveit_controller_manager') == 'fake')">
+        <!-- Joint state publisher for fake robot simulation -->
+        <node name="joint_state_publisher" pkg="joint_state_publisher" type="joint_state_publisher" unless="$(arg use_gui)">
+            <rosparam param="source_list">[move_group/fake_controller_joint_states]</rosparam>
+        </node>
+        
+        <!-- Optional GUI for manual joint control -->
+        <node name="joint_state_publisher" pkg="joint_state_publisher_gui" type="joint_state_publisher_gui" if="$(arg use_gui)">
+            <rosparam param="source_list">[move_group/fake_controller_joint_states]</rosparam>
+        </node>
+
+        <!-- Publish TF transforms for robot visualization -->
+        <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" respawn="true" output="screen"/>
+    </group>
+
+    <!-- Start MoveIt move_group with enhanced planning -->
+    <include file="$(dirname)/move_group.launch">
+        <arg name="allow_trajectory_execution" value="true"/>
+        <arg name="moveit_controller_manager" value="$(arg moveit_controller_manager)"/>
+        <arg name="fake_execution_type" value="$(arg fake_execution_type)"/>
+        <arg name="info" value="true"/>
+        <arg name="debug" value="$(arg debug)"/>
+        <arg name="pipeline" value="$(arg pipeline)"/>
+        <arg name="load_robot_description" value="$(arg load_robot_description)"/>
+    </include>
+
+    <!-- Optional RViz Visualization -->
+    <include file="$(dirname)/moveit_rviz.launch" if="$(arg use_rviz)">
+        <arg name="rviz_config" value="$(dirname)/moveit.rviz"/>
+        <arg name="debug" value="$(arg debug)"/>
+    </include>
+
+    <!-- Optional Database for Trajectory Storage -->
+    <include file="$(dirname)/default_warehouse_db.launch" if="$(arg db)">
+        <arg name="moveit_warehouse_database_path" value="$(arg db_path)"/>
+    </include>
+
+    <!-- Information Display -->
+    <node name="dijkstra_system_info" pkg="rostopic" type="rostopic" args="pub -1 /dijkstra_system_status std_msgs/String 'Enhanced Dijkstra MoveIt Server Active'" output="screen"/>
+
+</launch>
