@@ -15,13 +15,13 @@
     <arg name="tcp_port" default="10000" doc="Port for Unity-ROS TCP communication"/>
 
     <!-- Arguments for Dijkstra Path Planning -->
-    <arg name="dijkstra_height" default="0.1" doc="Height above table surface for 2D path planning (meters)"/>
+    <arg name="dijkstra_height" default="0.2" doc="Height above table surface for 2D path planning (meters)"/>
     <arg name="height_tolerance" default="0.05" doc="Tolerance for considering poses at same height (meters)"/>
     <arg name="use_dijkstra_preprocessing" default="true" doc="Enable Dijkstra 2D preprocessing"/>
 
     <!-- Arguments for MoveIt Configuration -->
     <arg name="pipeline" default="ompl" doc="Motion planning pipeline to use"/>
-    <arg name="planner_id" default="RRT" doc="Motion planner algorithm"/>
+    <arg name="planner_id" default="RRTConnect" doc="Motion planner algorithm"/>
     <arg name="planning_time" default="15.0" doc="Maximum planning time in seconds"/>
 
     <!-- Arguments for Visualization and Debugging -->

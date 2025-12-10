@@ -81,7 +81,7 @@ class DijkstraMoveitServer:
         self.height_tolerance = rospy.get_param('~height_tolerance', 0.05)  # Tolerance for considering poses at same height
         
         # Motion planning parameters
-        self.planner_id = rospy.get_param('~planner_id', 'RRT')
+        self.planner_id = rospy.get_param('~planner_id', 'RRTConnect')
         self.planning_time = rospy.get_param('~planning_time', 15.0)
         self.max_planning_attempts = rospy.get_param('~max_planning_attempts', 100)
         self.waypoint_sampling_step = rospy.get_param('~waypoint_sampling_step', 10)
@@ -258,20 +258,50 @@ class DijkstraMoveitServer:
                 # For shorter paths, use every other waypoint to reduce density
                 sampled_waypoints = world_path[::2] if len(world_path) > 5 else world_path
             
-            rospy.loginfo("Using %d waypoints for trajectory planning (from %d path points)", 
-                         len(sampled_waypoints), len(world_path))
+            # Skip initial waypoints to prevent table collision during pre-grasp
+            # Get current end effector position to calculate safe skip distance
+            move_group.set_joint_value_target(start_joint_angles)
+            current_pose = move_group.get_current_pose().pose
+            
+            # Skip waypoints that are too close to the starting position (within 0.3m)
+            # This prevents the robot from trying to move through the table surface
+            skip_distance = 0.3  # meters
+            filtered_waypoints = []
+            
+            for i, (x, y) in enumerate(sampled_waypoints):
+                distance_from_start = math.sqrt((x - current_pose.position.x)**2 + 
+                                              (y - current_pose.position.y)**2)
+                if distance_from_start >= skip_distance or i >= len(sampled_waypoints) - 2:
+                    # Keep waypoints that are far enough or the last few waypoints
+                    filtered_waypoints.append((x, y))
+            
+            # Ensure we have at least the final waypoint
+            if not filtered_waypoints and sampled_waypoints:
+                filtered_waypoints = [sampled_waypoints[-1]]
+            
+            sampled_waypoints = filtered_waypoints
+            
+            rospy.loginfo("Using %d waypoints for trajectory planning (from %d path points, %d after collision filtering)", 
+                         len(sampled_waypoints), len(world_path), len(filtered_waypoints))
             
             # Create waypoint poses
             waypoint_poses = []
-            for i, (x, y) in enumerate(sampled_waypoints[1:]):  # Skip first point (current position)
-                waypoint_pose = copy.deepcopy(final_pose)
-                waypoint_pose.position.x = x
-                waypoint_pose.position.y = y
-                waypoint_pose.position.z = self.dijkstra_height
-                waypoint_poses.append(waypoint_pose)
+            if sampled_waypoints:  # Only create waypoints if we have filtered waypoints
+                for i, (x, y) in enumerate(sampled_waypoints[1:]):  # Skip first point (current position)
+                    waypoint_pose = copy.deepcopy(final_pose)
+                    waypoint_pose.position.x = x
+                    waypoint_pose.position.y = y
+                    waypoint_pose.position.z = self.dijkstra_height
+                    waypoint_poses.append(waypoint_pose)
+                
+                # Set the final pose as the last waypoint
+                if waypoint_poses:
+                    waypoint_poses[-1] = final_pose
             
-            # Set the final pose as the last waypoint
-            waypoint_poses[-1] = final_pose
+            # If no intermediate waypoints after filtering, use direct planning
+            if not waypoint_poses:
+                rospy.loginfo("No intermediate waypoints after filtering, using direct planning")
+                return self._plan_direct_moveit(move_group, final_pose, start_joint_angles)
             
             # Plan through waypoints
             move_group.clear_pose_targets()
@@ -351,7 +381,7 @@ class DijkstraMoveitServer:
             rospy.loginfo("Planning pre-grasp trajectory...")
             # Adjust pose to dijkstra_height for 2D planning, then descend to actual target
             pre_grasp_planning_pose = copy.deepcopy(req.pick_pose)
-            pre_grasp_planning_pose.position.z = self.dijkstra_height  # Plan at safe height
+            pre_grasp_planning_pose.position.z = self.dijkstra_height # Plan at safe height
             pre_grasp_pose = self._plan_trajectory_with_dijkstra(
                 move_group, req.pick_pose, current_robot_joint_configuration, pre_grasp_planning_pose)
             
