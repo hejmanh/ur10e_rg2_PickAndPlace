@@ -12,6 +12,7 @@ import moveit_msgs.msg
 from moveit_msgs.msg import Constraints, JointConstraint, PositionConstraint, OrientationConstraint, BoundingVolume
 from sensor_msgs.msg import JointState
 from moveit_msgs.msg import RobotState, CollisionObject
+from shape_msgs.msg import SolidPrimitive
 import geometry_msgs.msg
 from geometry_msgs.msg import Quaternion, Pose
 from std_msgs.msg import String
@@ -30,17 +31,118 @@ else:
         return plan
 
 """
-    Callback function to log the received collision object message.
-    Given the start angles of the robot, plan a trajectory that ends at the destination pose.
+    Callback function to integrate collision objects with MoveIt's planning scene.
+    This allows the RRT planner to avoid dynamic obstacles from Unity.
 """
 def collision_callback(msg):
-    rospy.loginfo("Received a new collision object message:")
-    rospy.loginfo("ID: %s", msg.id)
-    if len(msg.mesh_poses) > 0:
-        pose = msg.mesh_poses[0]
-        rospy.loginfo("Pose: position - x=%f, y=%f, z=%f", pose.position.x, pose.position.y, pose.position.z)
-        rospy.loginfo("Pose: orientation - x=%f, y=%f, z=%f, w=%f", pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w)
-   
+    rospy.loginfo("Received collision object: %s (operation: %d)", msg.id, msg.operation)
+    
+    try:
+        # Get the planning scene interface (use asynchronous mode for collision object publisher)
+        scene = moveit_commander.PlanningSceneInterface(synchronous=False)
+        
+        if msg.operation == msg.ADD:
+            rospy.loginfo("Adding collision object '%s' to planning scene", msg.id)
+            
+            if len(msg.mesh_poses) > 0 and len(msg.meshes) > 0:
+                # Log the pose information
+                pose = msg.mesh_poses[0]
+                rospy.loginfo("Pose: position(%.3f, %.3f, %.3f) frame: %s", 
+                            pose.position.x, pose.position.y, pose.position.z, msg.header.frame_id)
+                
+                # Use the add_object method to add the collision object directly
+                scene.add_object(msg)
+                rospy.loginfo("Successfully added mesh collision object '%s' to planning scene", msg.id)
+                
+            # elif len(msg.primitive_poses) > 0 and len(msg.primitives) > 0:
+            #     # Handle primitive shapes (box, sphere, cylinder)
+            #     pose = msg.primitive_poses[0]
+            #     primitive = msg.primitives[0]
+            #     rospy.loginfo("Pose: position(%.3f, %.3f, %.3f) frame: %s", 
+            #                 pose.position.x, pose.position.y, pose.position.z, msg.header.frame_id)
+                
+            #     # Create a proper PoseStamped for primitives
+            #     from geometry_msgs.msg import PoseStamped
+            #     pose_stamped = PoseStamped()
+            #     pose_stamped.header.frame_id = msg.header.frame_id
+            #     pose_stamped.pose = pose
+                
+            #     if primitive.type == primitive.BOX:
+            #         # primitive.dimensions[0] = x, [1] = y, [2] = z
+            #         size = (primitive.dimensions[0], primitive.dimensions[1], primitive.dimensions[2])
+            #         scene.add_box(msg.id, pose_stamped, size)
+            #     elif primitive.type == primitive.SPHERE:
+            #         # primitive.dimensions[0] = radius
+            #         radius = primitive.dimensions[0]
+            #         scene.add_sphere(msg.id, pose_stamped, radius)
+            #     elif primitive.type == primitive.CYLINDER:
+            #         # primitive.dimensions[0] = height, [1] = radius
+            #         height = primitive.dimensions[0]
+            #         radius = primitive.dimensions[1]
+            #         scene.add_cylinder(msg.id, pose_stamped, height, radius)
+            #     else:
+            #         rospy.logwarn("Unsupported primitive type: %d for collision object '%s'", primitive.type, msg.id)
+            #         return
+                    
+            #     rospy.loginfo("Successfully added primitive collision object '%s' to planning scene", msg.id)
+                
+            else:
+                rospy.logwarn("No mesh or primitive data found for collision object '%s'", msg.id)
+                
+        elif msg.operation == msg.REMOVE:
+            rospy.loginfo("Removing collision object '%s' from planning scene", msg.id)
+            scene.remove_world_object(msg.id)
+            
+        elif msg.operation == msg.MOVE:
+            rospy.loginfo("Moving collision object '%s'", msg.id)
+            # For move operations, remove the old object and add the new one
+            scene.remove_world_object(msg.id)
+            rospy.sleep(0.1)  # Allow time for removal to propagate
+            
+            # Re-add the object with updated pose
+            if len(msg.mesh_poses) > 0 and len(msg.meshes) > 0:
+                # For mesh objects, use add_object
+                scene.add_object(msg)
+            elif len(msg.primitive_poses) > 0 and len(msg.primitives) > 0:
+                pose = msg.primitive_poses[0]
+                primitive = msg.primitives[0]
+                
+                # Create a proper PoseStamped for primitives
+                from geometry_msgs.msg import PoseStamped
+                pose_stamped = PoseStamped()
+                pose_stamped.header.frame_id = msg.header.frame_id
+                pose_stamped.pose = pose
+                
+                if primitive.type == primitive.BOX:
+                    size = (primitive.dimensions[0], primitive.dimensions[1], primitive.dimensions[2])
+                    scene.add_box(msg.id, pose_stamped, size)
+                elif primitive.type == primitive.SPHERE:
+                    radius = primitive.dimensions[0]
+                    scene.add_sphere(msg.id, pose_stamped, radius)
+                elif primitive.type == primitive.CYLINDER:
+                    height = primitive.dimensions[0]
+                    radius = primitive.dimensions[1]
+                    scene.add_cylinder(msg.id, pose_stamped, height, radius)
+            
+            rospy.loginfo("Successfully moved collision object '%s'", msg.id)
+            
+        else:
+            rospy.logwarn("Unknown collision object operation: %d", msg.operation)
+            
+        # Allow time for planning scene update to propagate
+        rospy.sleep(0.1)
+        
+        # Verify the object was added/removed
+        known_objects = scene.get_known_object_names()
+        if msg.operation == msg.ADD and msg.id in known_objects:
+            rospy.loginfo("Confirmed: '%s' is now in planning scene", msg.id)
+        elif msg.operation == msg.REMOVE and msg.id not in known_objects:
+            rospy.loginfo("Confirmed: '%s' removed from planning scene", msg.id)
+        
+    except Exception as e:
+        rospy.logerr("Failed to process collision object '%s': %s", msg.id, str(e))
+
+
 def plan_trajectory(move_group, destination_pose, start_joint_angles, max_attempts=100): 
     for attempt in range(max_attempts):
         try:
