@@ -16,7 +16,7 @@
 
     <!-- Arguments for Dijkstra Path Planning -->
     <arg name="dijkstra_height" default="0.2" doc="Height above table surface for 2D path planning (meters)"/>
-    <arg name="height_tolerance" default="0.05" doc="Tolerance for considering poses at same height (meters)"/>
+    <arg name="height_tolerance" default="0.2" doc="Tolerance for considering poses at same height (meters)"/>
     <arg name="use_dijkstra_preprocessing" default="true" doc="Enable Dijkstra 2D preprocessing"/>
 
     <!-- Arguments for MoveIt Configuration -->

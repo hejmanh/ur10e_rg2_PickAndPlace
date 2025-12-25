@@ -77,13 +77,13 @@ class DijkstraMoveitServer:
         # Configuration - Read from ROS parameters with defaults
         self.use_dijkstra_preprocessing = rospy.get_param('~use_dijkstra_preprocessing', True)
         # Height settings for 2D path planning
-        # Unity sends poses with z=0 at table surface, so 10cm above table is reasonable for gripper clearance
+        # Unity sends poses with z=0 at table surface, so 20cm above table is reasonable for gripper clearance
         self.dijkstra_height = rospy.get_param('~dijkstra_height', 0.2)  # Height above table surface for 2D path planning
-        self.height_tolerance = rospy.get_param('~height_tolerance', 0.05)  # Tolerance for considering poses at same height
+        self.height_tolerance = rospy.get_param('~height_tolerance', 0.1)  # Tolerance for considering poses at same height
         
         # Motion planning parameters
         self.planner_id = rospy.get_param('~planner_id', 'RRTConnect')
-        self.planning_time = rospy.get_param('~planning_time', 15.0)
+        self.planning_time = rospy.get_param('~planning_time', 30.0)
         self.max_planning_attempts = rospy.get_param('~max_planning_attempts', 100)
         self.waypoint_sampling_step = rospy.get_param('~waypoint_sampling_step', 10)
         #if adjust the division too high -> smaller step size -> more waypoints -> too close, RRT can not find a path
@@ -277,10 +277,21 @@ class DijkstraMoveitServer:
         current_pose = move_group.get_current_pose().pose
         
         # Check if we should use Dijkstra preprocessing
-        use_dijkstra = (self.use_dijkstra_preprocessing and 
-                       self._poses_at_same_height(current_pose, pose_for_2d_planning) and
-                       self._pose_in_2d_workspace(current_pose) and 
-                       self._pose_in_2d_workspace(pose_for_2d_planning))
+        dijkstra_enabled = self.use_dijkstra_preprocessing
+        same_height = self._poses_at_same_height(current_pose, pose_for_2d_planning)
+        current_in_workspace = True  # self._pose_in_2d_workspace(current_pose)
+        target_in_workspace = True   # self._pose_in_2d_workspace(pose_for_2d_planning)
+        
+        use_dijkstra = (dijkstra_enabled and same_height and current_in_workspace and target_in_workspace)
+        
+        # Debug logging for conditions
+        rospy.loginfo("Dijkstra conditions - enabled: %s, same_height: %s, current_in_ws: %s, target_in_ws: %s", 
+                     dijkstra_enabled, same_height, current_in_workspace, target_in_workspace)
+        rospy.loginfo("Current pose: (%.3f, %.3f, %.3f), Target pose: (%.3f, %.3f, %.3f)", 
+                     current_pose.position.x, current_pose.position.y, current_pose.position.z,
+                     pose_for_2d_planning.position.x, pose_for_2d_planning.position.y, pose_for_2d_planning.position.z)
+        rospy.loginfo("Dijkstra height: %.3f, Height tolerance: %.3f", 
+                     self.dijkstra_height, self.height_tolerance)
         
         if use_dijkstra:
             rospy.loginfo("Using Dijkstra preprocessing for trajectory planning")
