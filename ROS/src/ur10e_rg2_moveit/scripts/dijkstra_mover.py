@@ -21,6 +21,7 @@ import moveit_msgs.msg
 from moveit_msgs.msg import Constraints, JointConstraint, PositionConstraint, OrientationConstraint, BoundingVolume
 from sensor_msgs.msg import JointState
 from moveit_msgs.msg import RobotState, CollisionObject
+from shape_msgs.msg import SolidPrimitive
 import geometry_msgs.msg
 from geometry_msgs.msg import Quaternion, Pose
 from std_msgs.msg import String
@@ -76,13 +77,13 @@ class DijkstraMoveitServer:
         # Configuration - Read from ROS parameters with defaults
         self.use_dijkstra_preprocessing = rospy.get_param('~use_dijkstra_preprocessing', True)
         # Height settings for 2D path planning
-        # Unity sends poses with z=0 at table surface, so 10cm above table is reasonable for gripper clearance
+        # Unity sends poses with z=0 at table surface, so 20cm above table is reasonable for gripper clearance
         self.dijkstra_height = rospy.get_param('~dijkstra_height', 0.2)  # Height above table surface for 2D path planning
-        self.height_tolerance = rospy.get_param('~height_tolerance', 0.05)  # Tolerance for considering poses at same height
+        self.height_tolerance = rospy.get_param('~height_tolerance', 0.1)  # Tolerance for considering poses at same height
         
         # Motion planning parameters
-        self.planner_id = rospy.get_param('~planner_id', 'RRT')
-        self.planning_time = rospy.get_param('~planning_time', 15.0)
+        self.planner_id = rospy.get_param('~planner_id', 'RRTConnect')
+        self.planning_time = rospy.get_param('~planning_time', 30.0)
         self.max_planning_attempts = rospy.get_param('~max_planning_attempts', 100)
         self.waypoint_sampling_step = rospy.get_param('~waypoint_sampling_step', 10)
         #if adjust the division too high -> smaller step size -> more waypoints -> too close, RRT can not find a path
@@ -107,21 +108,124 @@ class DijkstraMoveitServer:
     
     def collision_callback(self, msg):
         """
-        Enhanced collision callback that updates the grid for path planning
+        Enhanced collision callback that integrates collision objects with MoveIt's planning scene
+        and updates the grid for path planning. This allows the RRT planner to avoid dynamic
+        obstacles from Unity.
         """
-        rospy.loginfo("Received collision object: %s", msg.id)
+        rospy.loginfo("Received collision object: %s (operation: %d)", msg.id, msg.operation)
         
-        # Store the collision object
-        self.collision_objects[msg.id] = msg
-        
-        # Log pose information if available
-        if len(msg.mesh_poses) > 0:
-            pose = msg.mesh_poses[0]
-            rospy.loginfo("Pose: position - x=%.3f, y=%.3f, z=%.3f", 
-                         pose.position.x, pose.position.y, pose.position.z)
-        
-        # Update the grid with new obstacle information
-        self._update_grid()
+        try:
+            scene = moveit_commander.PlanningSceneInterface(synchronous=True)
+            rospy.sleep(0.1)  # Allow time for planning scene to initialize
+            
+            if msg.operation == msg.ADD:
+                rospy.loginfo("Adding collision object '%s' to planning scene", msg.id)
+                
+                # Store the collision object for grid planning
+                self.collision_objects[msg.id] = msg
+                
+                # Add to MoveIt's planning scene
+                if len(msg.mesh_poses) > 0 and len(msg.meshes) > 0:
+                    # For mesh objects, use add_object
+                    scene.add_object(msg)
+                    rospy.loginfo("Successfully added mesh collision object '%s' to planning scene", msg.id)
+                elif len(msg.primitive_poses) > 0 and len(msg.primitives) > 0:
+                    # Handle primitive shapes (box, sphere, cylinder)
+                    pose = msg.primitive_poses[0]
+                    primitive = msg.primitives[0]
+                    rospy.loginfo("Pose: position(%.3f, %.3f, %.3f) frame: %s", 
+                                pose.position.x, pose.position.y, pose.position.z, msg.header.frame_id)
+                    
+                    # Create a proper PoseStamped for primitives
+                    from geometry_msgs.msg import PoseStamped
+                    pose_stamped = PoseStamped()
+                    pose_stamped.header.frame_id = msg.header.frame_id
+                    pose_stamped.pose = pose
+                    
+                    if primitive.type == primitive.BOX:
+                        # primitive.dimensions[0] = x, [1] = y, [2] = z
+                        size = (primitive.dimensions[0], primitive.dimensions[1], primitive.dimensions[2])
+                        scene.add_box(msg.id, pose_stamped, size)
+                    elif primitive.type == primitive.SPHERE:
+                        # primitive.dimensions[0] = radius
+                        radius = primitive.dimensions[0]
+                        scene.add_sphere(msg.id, pose_stamped, radius)
+                    elif primitive.type == primitive.CYLINDER:
+                        # primitive.dimensions[0] = height, [1] = radius
+                        height = primitive.dimensions[0]
+                        radius = primitive.dimensions[1]
+                        scene.add_cylinder(msg.id, pose_stamped, height, radius)
+                    else:
+                        rospy.logwarn("Unsupported primitive type: %d for collision object '%s'", primitive.type, msg.id)
+                        return
+                            
+                    rospy.loginfo("Successfully added primitive collision object '%s' to planning scene", msg.id)
+                    
+                else:
+                    rospy.logwarn("No mesh or primitive data found for collision object '%s'", msg.id)
+                    
+            elif msg.operation == msg.REMOVE:
+                rospy.loginfo("Removing collision object '%s' from planning scene", msg.id)
+                scene.remove_world_object(msg.id)
+                
+                # Remove from grid planning storage
+                if msg.id in self.collision_objects:
+                    del self.collision_objects[msg.id]
+                
+            elif msg.operation == msg.MOVE:
+                rospy.loginfo("Moving collision object '%s'", msg.id)
+                # For move operations, remove the old object and add the new one
+                scene.remove_world_object(msg.id)
+                rospy.sleep(0.1)  # Allow time for removal to propagate
+                
+                # Update stored collision object
+                self.collision_objects[msg.id] = msg
+                
+                # Re-add the object with updated pose
+                if len(msg.mesh_poses) > 0 and len(msg.meshes) > 0:
+                    # For mesh objects, use add_object
+                    scene.add_object(msg)
+                elif len(msg.primitive_poses) > 0 and len(msg.primitives) > 0:
+                    pose = msg.primitive_poses[0]
+                    primitive = msg.primitives[0]
+                    
+                    # Create a proper PoseStamped for primitives
+                    from geometry_msgs.msg import PoseStamped
+                    pose_stamped = PoseStamped()
+                    pose_stamped.header.frame_id = msg.header.frame_id
+                    pose_stamped.pose = pose
+                    
+                    if primitive.type == primitive.BOX:
+                        size = (primitive.dimensions[0], primitive.dimensions[1], primitive.dimensions[2])
+                        scene.add_box(msg.id, pose_stamped, size)
+                    elif primitive.type == primitive.SPHERE:
+                        radius = primitive.dimensions[0]
+                        scene.add_sphere(msg.id, pose_stamped, radius)
+                    elif primitive.type == primitive.CYLINDER:
+                        height = primitive.dimensions[0]
+                        radius = primitive.dimensions[1]
+                        scene.add_cylinder(msg.id, pose_stamped, height, radius)
+                
+                rospy.loginfo("Successfully moved collision object '%s'", msg.id)
+                
+            else:
+                rospy.logwarn("Unknown collision object operation: %d", msg.operation)
+                
+            # Allow time for planning scene update to propagate
+            rospy.sleep(0.1)
+            
+            # Verify the object was added/removed
+            known_objects = scene.get_known_object_names()
+            if msg.operation == msg.ADD and msg.id in known_objects:
+                rospy.loginfo("Confirmed: '%s' is now in planning scene", msg.id)
+            elif msg.operation == msg.REMOVE and msg.id not in known_objects:
+                rospy.loginfo("Confirmed: '%s' removed from planning scene", msg.id)
+            
+            # Update the grid with new obstacle information (for Dijkstra planning)
+            self._update_grid()
+            
+        except Exception as e:
+            rospy.logerr("Failed to process collision object '%s': %s", msg.id, str(e))
     
     def _update_grid(self):
         """Update the 2D grid with current collision objects"""
@@ -173,10 +277,21 @@ class DijkstraMoveitServer:
         current_pose = move_group.get_current_pose().pose
         
         # Check if we should use Dijkstra preprocessing
-        use_dijkstra = (self.use_dijkstra_preprocessing and 
-                       self._poses_at_same_height(current_pose, pose_for_2d_planning) and
-                       self._pose_in_2d_workspace(current_pose) and 
-                       self._pose_in_2d_workspace(pose_for_2d_planning))
+        dijkstra_enabled = self.use_dijkstra_preprocessing
+        same_height = self._poses_at_same_height(current_pose, pose_for_2d_planning)
+        current_in_workspace = True  # self._pose_in_2d_workspace(current_pose)
+        target_in_workspace = True   # self._pose_in_2d_workspace(pose_for_2d_planning)
+        
+        use_dijkstra = (dijkstra_enabled and same_height and current_in_workspace and target_in_workspace)
+        
+        # Debug logging for conditions
+        rospy.loginfo("Dijkstra conditions - enabled: %s, same_height: %s, current_in_ws: %s, target_in_ws: %s", 
+                     dijkstra_enabled, same_height, current_in_workspace, target_in_workspace)
+        rospy.loginfo("Current pose: (%.3f, %.3f, %.3f), Target pose: (%.3f, %.3f, %.3f)", 
+                     current_pose.position.x, current_pose.position.y, current_pose.position.z,
+                     pose_for_2d_planning.position.x, pose_for_2d_planning.position.y, pose_for_2d_planning.position.z)
+        rospy.loginfo("Dijkstra height: %.3f, Height tolerance: %.3f", 
+                     self.dijkstra_height, self.height_tolerance)
         
         if use_dijkstra:
             rospy.loginfo("Using Dijkstra preprocessing for trajectory planning")
@@ -258,20 +373,50 @@ class DijkstraMoveitServer:
                 # For shorter paths, use every other waypoint to reduce density
                 sampled_waypoints = world_path[::2] if len(world_path) > 5 else world_path
             
-            rospy.loginfo("Using %d waypoints for trajectory planning (from %d path points)", 
-                         len(sampled_waypoints), len(world_path))
+            # Skip initial waypoints to prevent table collision during pre-grasp
+            # Get current end effector position to calculate safe skip distance
+            move_group.set_joint_value_target(start_joint_angles)
+            current_pose = move_group.get_current_pose().pose
+            
+            # Skip waypoints that are too close to the starting position (within 0.3m)
+            # This prevents the robot from trying to move through the table surface
+            skip_distance = 0.3  # meters
+            filtered_waypoints = []
+            
+            for i, (x, y) in enumerate(sampled_waypoints):
+                distance_from_start = math.sqrt((x - current_pose.position.x)**2 + 
+                                              (y - current_pose.position.y)**2)
+                if distance_from_start >= skip_distance or i >= len(sampled_waypoints) - 2:
+                    # Keep waypoints that are far enough or the last few waypoints
+                    filtered_waypoints.append((x, y))
+            
+            # Ensure we have at least the final waypoint
+            if not filtered_waypoints and sampled_waypoints:
+                filtered_waypoints = [sampled_waypoints[-1]]
+            
+            sampled_waypoints = filtered_waypoints
+            
+            rospy.loginfo("Using %d waypoints for trajectory planning (from %d path points, %d after collision filtering)", 
+                         len(sampled_waypoints), len(world_path), len(filtered_waypoints))
             
             # Create waypoint poses
             waypoint_poses = []
-            for i, (x, y) in enumerate(sampled_waypoints[1:]):  # Skip first point (current position)
-                waypoint_pose = copy.deepcopy(final_pose)
-                waypoint_pose.position.x = x
-                waypoint_pose.position.y = y
-                waypoint_pose.position.z = self.dijkstra_height
-                waypoint_poses.append(waypoint_pose)
+            if sampled_waypoints:  # Only create waypoints if we have filtered waypoints
+                for i, (x, y) in enumerate(sampled_waypoints[1:]):  # Skip first point (current position)
+                    waypoint_pose = copy.deepcopy(final_pose)
+                    waypoint_pose.position.x = x
+                    waypoint_pose.position.y = y
+                    waypoint_pose.position.z = self.dijkstra_height
+                    waypoint_poses.append(waypoint_pose)
+                
+                # Set the final pose as the last waypoint
+                if waypoint_poses:
+                    waypoint_poses[-1] = final_pose
             
-            # Set the final pose as the last waypoint
-            waypoint_poses[-1] = final_pose
+            # If no intermediate waypoints after filtering, use direct planning
+            if not waypoint_poses:
+                rospy.loginfo("No intermediate waypoints after filtering, using direct planning")
+                return self._plan_direct_moveit(move_group, final_pose, start_joint_angles)
             
             # Plan through waypoints
             move_group.clear_pose_targets()
@@ -288,7 +433,7 @@ class DijkstraMoveitServer:
             
             # Configure planning with more tolerance for waypoint sequences
             move_group.set_planner_id(self.planner_id)
-            move_group.set_planning_time(self.planning_time + 10.0)  # Extra time for complex waypoint planning
+            move_group.set_planning_time(self.planning_time + 15.0)  # Extra time for complex waypoint planning
             move_group.set_num_planning_attempts(5)  # Multiple attempts
             move_group.set_goal_tolerance(0.01)  # Allow small goal tolerance 
             
@@ -351,7 +496,7 @@ class DijkstraMoveitServer:
             rospy.loginfo("Planning pre-grasp trajectory...")
             # Adjust pose to dijkstra_height for 2D planning, then descend to actual target
             pre_grasp_planning_pose = copy.deepcopy(req.pick_pose)
-            pre_grasp_planning_pose.position.z = self.dijkstra_height  # Plan at safe height
+            pre_grasp_planning_pose.position.z = self.dijkstra_height # Plan at safe height
             pre_grasp_pose = self._plan_trajectory_with_dijkstra(
                 move_group, req.pick_pose, current_robot_joint_configuration, pre_grasp_planning_pose)
             
